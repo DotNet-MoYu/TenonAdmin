@@ -4,23 +4,29 @@ name: backend-ci
 on:
   push:
     branches: [main, dev]
-    paths: ['backend/**', 'templates/**', '.github/workflows/backend-ci.yml']
+    paths: ['backend/**', 'templates/**', '.github/workflows/backend-ci.yml', 'scripts/test-backend-shard.py', 'scripts/test_backend_shard_test.py']
   pull_request:
-    paths: ['backend/**', 'templates/**', '.github/workflows/backend-ci.yml']
-  # Nightly full run: every DB leg runs the WHOLE suite, including the slow SqlServer full pass (40-60 min)
-  # that push/PR deliberately skips (see the SqlServer filter in the Test step). schedule ignores `paths`,
-  # so this always fires — the safety net that catches anything the PR-time SqlServer subset doesn't cover.
+    paths: ['backend/**', 'templates/**', '.github/workflows/backend-ci.yml', 'scripts/test-backend-shard.py', 'scripts/test_backend_shard_test.py']
+  # nightly 四库全量；SQL Server 四片并集为完整测试集，push/PR 仍保留原方言子集。
+  # schedule 不受 paths 限制，持续覆盖 PR 子集之外的回归。
   schedule:
     - cron: '0 18 * * *'   # 02:00 Asia/Shanghai
 
 jobs:
   build-test:
+    # 保留其它数据库的 check 名；SQL Server 四片由下方同名汇总 check 把关。
+    name: build-test (${{ matrix.db }}${{ matrix.db == 'sqlserver' && format(', shard {0}', matrix.shard) || '' }})
     runs-on: ubuntu-latest
     # Database matrix (design §8 "at least SQLite + MySQL", plus SqlServer here). fail-fast=false: one red leg won't mask the others.
     strategy:
       fail-fast: false
       matrix:
         db: [sqlite, mysql, sqlserver, postgres]
+        shard: [1]
+        include:
+          - { db: sqlserver, shard: 2 }
+          - { db: sqlserver, shard: 3 }
+          - { db: sqlserver, shard: 4 }
 
     # Service containers (started for every leg; legs that don't need them just ignore them — cheap, and avoids the complexity of conditional services).
     services:
@@ -109,6 +115,9 @@ jobs:
           done
           echo "SQL Server did not become ready in time"; exit 1
 
+      - name: Verify test partitioning
+        run: python3 -B scripts/test_backend_shard_test.py
+
       # Unit + integration tests (WebApplicationFactory). The DB is selected via env vars (see tests/TestDb.cs):
       #   sqlite leg → each test gets its own temp .db file; mysql/sqlserver legs → each test gets its own DB
       #   (derived from DbPath, auto-created/dropped). Includes the §8 replaceability six-piece suite +
@@ -125,9 +134,8 @@ jobs:
           TENON_TEST_POSTGRESQL: ${{ matrix.db == 'postgres' && 'Server=127.0.0.1;Port=5432;User ID=postgres;Password=postgres;' || '' }}
           # Gate switch for the Redis contract tests (runs on every leg: it's DB-independent, and running it a few extra times only costs a few seconds).
           TENON_TEST_REDIS: 127.0.0.1:6379
-          # SqlServer full suite builds ~200 isolated databases, each replaying 23 CREATE TABLE whose per-statement
-          # log flush dominates — 40-60 min on every push/PR (measured 2026-07-20; see CLAUDE.md "CI"). On push/PR the
-          # SqlServer leg runs only the dialect-sensitive subset: the SqlServer-SPECIFIC surface (nvarchar Chinese,
+          # SQL Server 的隔离库初始化成本高；当前 CodeFirst 已有事务，不能继续把历史逐条刷盘
+          # 结论当作当前根因。push/PR 保留原方言敏感子集（nvarchar 中文等）：
           # CodeFirst_BigString long-text Chinese — bare ColumnDataType=text is non-Unicode on SqlServer and turns
           # Chinese into ???, caught by JobSchedulerTests orphan-reape ErrorText asserts / nightly #25;
           # boolean-predicate global filters, T-SQL DDL/bootstrap, Storageable seed SQL, and the scheduler's DateTime
@@ -136,19 +144,37 @@ jobs:
           # (schedule) as the net. Rename a class out of this list and it silently drops to nightly-only — not a coverage
           # hole, just delayed signal. Other legs and the nightly run are unfiltered.
           #
-          # The workflow sidecar tests cover the M3a-1 reliable-execution tables (wf_node_execution /
-          # wf_node_execution_attempt / wf_outbox), including Task 8b's entry, worker, exception, recovery,
-          # production E2E, and retry-policy database-sensitive paths. Cost remains minutes rather than the 40-60
-          # minute full suite; if this leg ever gets visibly slower, trim a sidecar entry so it falls back to nightly
-          # — do NOT add timeout-minutes instead.
+          # 保留全部既有方言/事务/fence 回归；按实际发现的方法分到四个独立 runner，
+          # 每片有自己的 SQL Server。nightly 先无过滤发现，再分片，四片并集仍为全量。
           TEST_FILTER: ${{ (matrix.db == 'sqlserver' && github.event_name != 'schedule') && 'FullyQualifiedName~DataScopeTests|FullyQualifiedName~SoftDeleteAuditTests|FullyQualifiedName~OrgAuditEntityTests|FullyQualifiedName~SeedUpgradeTests|FullyQualifiedName~CodeFirstNullableUpgradeTests|FullyQualifiedName~RecycleBinTests|FullyQualifiedName~UserCrudTests|FullyQualifiedName~DictCrudTests|FullyQualifiedName~ReplaceabilityTests|FullyQualifiedName~ProductionBootstrapTests|FullyQualifiedName~JobElectionTests|FullyQualifiedName~JobClaimTests|FullyQualifiedName~JobSchedulerTests|FullyQualifiedName~WfPersistenceContractTests|FullyQualifiedName~WfNodeExecutionContractTests|FullyQualifiedName~WfNodeExecutionEntryTests|FullyQualifiedName~WfNodeExecutionWorkerTests|FullyQualifiedName~WfNodeExecutionExceptionTests|FullyQualifiedName~WfNodeExecutionRecoveryTests|FullyQualifiedName~WfNodeExecutionProductionE2ETests|FullyQualifiedName~WfNodeExecutionRetryPolicyTests' || '' }}
         run: |
-          if [ -n "$TEST_FILTER" ]; then
-            echo "SqlServer push/PR leg: dialect-sensitive subset only (full SqlServer suite runs nightly)"
-            dotnet test backend/TenonAdmin.slnx -c Release --no-build --filter "$TEST_FILTER"
+          if [ "${{ matrix.db }}" = sqlserver ]; then
+            python3 scripts/test-backend-shard.py --shard "${{ matrix.shard }}" --count 4 \
+              --results TestResults backend/tests/*/bin/Release/net10.0/*Tests.dll
           else
-            dotnet test backend/TenonAdmin.slnx -c Release --no-build
+            dotnet test backend/TenonAdmin.slnx -c Release --no-build \
+              --logger 'trx;LogFileName=tests.trx' --results-directory TestResults
           fi
+
+      - name: Upload test results and shard manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-tests-${{ matrix.db }}-${{ matrix.shard }}
+          path: TestResults/
+          retention-days: 7
+
+  # 保留原 SQL Server required check 名；任一片失败或取消都不能变绿。
+  sqlserver-check:
+    name: build-test (sqlserver)
+    needs: build-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every database shard to pass
+        env:
+          RESULT: ${{ needs.build-test.result }}
+        run: test "$RESULT" = success
 
   # The consumer's first command (dotnet new tenon-app → restore → build). Previously had zero automated
   # coverage — so the template kept referencing a package version whose tag was never published, and nobody
