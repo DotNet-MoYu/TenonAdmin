@@ -59,6 +59,11 @@ internal static class TestDb
     /// <summary>当前是否正在由模板宿主初始化模板库。</summary>
     public static bool IsSqlServerTemplateInitialization => sqlServerTemplateInitializing is not null;
 
+    /// <summary>判断当前工厂是否就是正在初始化的指定模板宿主,避免并行测试误接入模板库。</summary>
+    public static bool IsSqlServerTemplateInitializationFor(string templateKind, string databaseName) =>
+        string.Equals(sqlServerTemplateInitializing, templateKind, StringComparison.Ordinal) &&
+        string.Equals(databaseName, TemplateDbName(templateKind), StringComparison.Ordinal);
+
     /// <summary>隔离库名(由 identity 派生,合法标识符、稳定;MySQL 与 SqlServer 共用规则)。</summary>
     private static string DbName(string identity) =>
         "tenon_it_" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)))[..16].ToLowerInvariant();

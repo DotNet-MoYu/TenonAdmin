@@ -35,12 +35,12 @@ public sealed class AdminAppFactory : WebApplicationFactory<Program>
         // SQL Server 可选模板库:普通开发测试从备份恢复,显式同库重启/生产闸门用例保留原始初始化路径。
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
         var useSqlServerTemplate = EnvironmentName == "Development" &&
-            (DeleteDbOnDispose || TestDb.IsSqlServerTemplateInitialization);
+            (DeleteDbOnDispose || TestDb.IsSqlServerTemplateInitializationFor("admin", DbPath));
         var connectionString = useSqlServerTemplate
             ? TestDb.ConnectionString(DbPath, DbPath, "admin")
             : TestDb.ConnectionString(DbPath, DbPath);
         builder.UseSetting("TenonAdmin:Database:ConnectionString", connectionString);
-        if (TestDb.SqlServerTemplateEnabled && !TestDb.IsSqlServerTemplateInitialization &&
+        if (TestDb.SqlServerTemplateEnabled && !TestDb.IsSqlServerTemplateInitializationFor("admin", DbPath) &&
             EnvironmentName == "Development" && DeleteDbOnDispose)
         {
             builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");
