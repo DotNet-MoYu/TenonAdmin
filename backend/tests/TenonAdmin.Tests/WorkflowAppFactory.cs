@@ -20,7 +20,7 @@ public sealed class WorkflowAppFactory : WebApplicationFactory<workflowhost::Wor
         builder.UseEnvironment("Development");
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
         builder.UseSetting("TenonAdmin:Database:ConnectionString", TestDb.ConnectionString(DbPath, DbPath, "workflow"));
-        if (TestDb.SchemaTemplateEnabled && !TestDb.IsSchemaTemplateInitialization)
+        if (TestDb.SchemaTemplateEnabled && Overrides is null && !TestDb.IsSchemaTemplateInitialization)
         {
             builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");
             builder.UseSetting("TenonAdmin:Database:EnableSeed", "false");

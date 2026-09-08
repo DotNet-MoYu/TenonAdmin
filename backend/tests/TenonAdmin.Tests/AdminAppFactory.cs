@@ -35,12 +35,14 @@ public sealed class AdminAppFactory : WebApplicationFactory<Program>
         // SQL Server/MySQL 可选模板库:普通开发测试从模板复制,显式同库重启/生产闸门用例保留原始初始化路径。
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
         var useSchemaTemplate = EnvironmentName == "Development" &&
+            Overrides is null &&
             (DeleteDbOnDispose || TestDb.IsSchemaTemplateInitializationFor("admin", DbPath));
         var connectionString = useSchemaTemplate
             ? TestDb.ConnectionString(DbPath, DbPath, "admin")
             : TestDb.ConnectionString(DbPath, DbPath);
         builder.UseSetting("TenonAdmin:Database:ConnectionString", connectionString);
-        if (TestDb.SchemaTemplateEnabled && !TestDb.IsSchemaTemplateInitializationFor("admin", DbPath) &&
+        if (TestDb.SchemaTemplateEnabled && Overrides is null &&
+            !TestDb.IsSchemaTemplateInitializationFor("admin", DbPath) &&
             EnvironmentName == "Development" && DeleteDbOnDispose)
         {
             builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");
