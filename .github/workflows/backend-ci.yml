@@ -119,7 +119,8 @@ jobs:
         run: python3 -B scripts/test_backend_shard_test.py
 
       # Unit + integration tests (WebApplicationFactory). The DB is selected via env vars (see tests/TestDb.cs):
-      #   sqlite leg → each test gets its own temp .db file; mysql/sqlserver legs → each test gets its own DB
+      #   sqlite leg → each test gets its own temp .db file; mysql leg → each test gets its own DB;
+      #   sqlserver leg → ordinary host tests restore their own DB from one per-shard template.
       #   (derived from DbPath, auto-created/dropped). Includes the §8 replaceability six-piece suite +
       #   data-scope + auth/authorization/rate-limit regression tests.
       - name: Test (${{ matrix.db }})
@@ -130,6 +131,9 @@ jobs:
           TENON_TEST_MYSQL: ${{ matrix.db == 'mysql' && 'Server=127.0.0.1;Port=3306;User ID=root;Password=root;AllowPublicKeyRetrieval=true;SSL Mode=None;Maximum Pool Size=10;Connection Idle Timeout=30;' || '' }}
           # The SqlServer connection string carries TrustServerCertificate/Encrypt=False: MDS 5.x encrypts by default and CI has no trusted certificate. The base string omits Database; TestDb appends it when creating the isolated DB.
           TENON_TEST_SQLSERVER: ${{ matrix.db == 'sqlserver' && 'Server=127.0.0.1;User ID=sa;Password=Tenon_Ci_2026;TrustServerCertificate=True;Encrypt=False;' || '' }}
+          # The SQL Server process owns this path: the test process writes the template backup through T-SQL, then restores per-test databases from it.
+          TENON_TEST_SQLSERVER_TEMPLATE: ${{ matrix.db == 'sqlserver' && '1' || '' }}
+          TENON_TEST_SQLSERVER_BACKUP_DIR: ${{ matrix.db == 'sqlserver' && '/var/opt/mssql/data' || '' }}
           # The PostgreSQL base string omits Database (connects to the maintenance DB postgres to create the isolated DB; TestDb appends Database after creating it).
           TENON_TEST_POSTGRESQL: ${{ matrix.db == 'postgres' && 'Server=127.0.0.1;Port=5432;User ID=postgres;Password=postgres;' || '' }}
           # Gate switch for the Redis contract tests (runs on every leg: it's DB-independent, and running it a few extra times only costs a few seconds).

@@ -32,9 +32,20 @@ public sealed class AdminAppFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment(EnvironmentName);
-        // DB 选择走 TestDb:默认 SQLite(DbPath 文件);CI MySQL 腿按 DbPath 派生独立库(同 DbPath 共享库,幂等用例用)
+        // SQL Server 可选模板库:普通开发测试从备份恢复,显式同库重启/生产闸门用例保留原始初始化路径。
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
-        builder.UseSetting("TenonAdmin:Database:ConnectionString", TestDb.ConnectionString(DbPath, DbPath));
+        var useSqlServerTemplate = EnvironmentName == "Development" &&
+            (DeleteDbOnDispose || TestDb.IsSqlServerTemplateInitialization);
+        var connectionString = useSqlServerTemplate
+            ? TestDb.ConnectionString(DbPath, DbPath, "admin")
+            : TestDb.ConnectionString(DbPath, DbPath);
+        builder.UseSetting("TenonAdmin:Database:ConnectionString", connectionString);
+        if (TestDb.SqlServerTemplateEnabled && !TestDb.IsSqlServerTemplateInitialization &&
+            EnvironmentName == "Development" && DeleteDbOnDispose)
+        {
+            builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");
+            builder.UseSetting("TenonAdmin:Database:EnableSeed", "false");
+        }
         builder.UseSetting("TenonAdmin:Seed:AdminPassword", "Test@123456");
         // 固定 >=32 字节 JWT 密钥:避免各测试并发写同一 ./data/dev-jwt.key 文件
         builder.UseSetting("TenonAdmin:Jwt:SecretKey", "tenon-integration-test-signing-key-please-keep-32plus");

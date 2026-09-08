@@ -19,7 +19,12 @@ public sealed class WorkflowAppFactory : WebApplicationFactory<workflowhost::Wor
     {
         builder.UseEnvironment("Development");
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
-        builder.UseSetting("TenonAdmin:Database:ConnectionString", TestDb.ConnectionString(DbPath, DbPath));
+        builder.UseSetting("TenonAdmin:Database:ConnectionString", TestDb.ConnectionString(DbPath, DbPath, "workflow"));
+        if (TestDb.SqlServerTemplateEnabled && !TestDb.IsSqlServerTemplateInitialization)
+        {
+            builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");
+            builder.UseSetting("TenonAdmin:Database:EnableSeed", "false");
+        }
         builder.UseSetting("TenonAdmin:Seed:AdminPassword", "Test@123456");
         builder.UseSetting("TenonAdmin:Jwt:SecretKey", "tenon-workflow-test-signing-key-please-keep-32plus");
         builder.UseSetting("TenonAdmin:Security:DataProtection:Key", Convert.ToBase64String(new byte[32]));
@@ -36,6 +41,6 @@ public sealed class WorkflowAppFactory : WebApplicationFactory<workflowhost::Wor
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) TestDb.Cleanup(DbPath, DbPath);
+        if (disposing && !TestDb.IsSqlServerTemplateInitialization) TestDb.Cleanup(DbPath, DbPath);
     }
 }
