@@ -15,6 +15,7 @@ namespace TenonAdmin.Tests;
 /// 需带 <c>TrustServerCertificate=True;Encrypt=False</c> —— MDS 4.x 默认加密且本地无受信证书)。</item>
 /// <item><c>TENON_TEST_SQLSERVER_TEMPLATE=1</c> 时,普通 WebApplicationFactory 测试从模板备份恢复;
 /// <c>TENON_TEST_SQLSERVER_BACKUP_DIR</c> 为 SQL Server 容器内可写目录(默认 <c>/var/opt/mssql/data</c>)。</item>
+/// <item><c>TENON_TEST_MYSQL_TEMPLATE=1</c> 时,普通 WebApplicationFactory 测试从一次性 CodeFirst 模板复制表结构和种子数据。</item>
 /// </list>
 /// <para>库隔离:库名由 <c>identity</c> 确定性派生——同 identity → 同库(支持"同库二次启动"的幂等用例),
 /// 不同 identity → 各自独立库。建库/删库经原始 <see cref="MySqlConnection"/> / <see cref="SqlConnection"/>
@@ -24,9 +25,14 @@ internal static class TestDb
 {
     private static readonly object SqlServerTemplateGate = new();
     private static readonly Dictionary<string, string> SqlServerTemplateBackups = new(StringComparer.Ordinal);
+    private static readonly object MySqlTemplateGate = new();
+    private static readonly Dictionary<string, MySqlTemplateSchema> MySqlTemplateSchemas = new(StringComparer.Ordinal);
     private static readonly string SqlServerTemplateProcessId = $"{Environment.ProcessId}_{Guid.NewGuid():N}";
     private static string? sqlServerTemplateInitializing;
+    private static string? mySqlTemplateInitializing;
     private static bool sqlServerTemplateCleanupRegistered;
+
+    private sealed record MySqlTemplateSchema(IReadOnlyList<(string TableName, string CreateSql)> Tables);
 
     public static bool UseMySql =>
         string.Equals(Environment.GetEnvironmentVariable("TENON_TEST_DBTYPE"), "MySql", StringComparison.OrdinalIgnoreCase);
@@ -56,12 +62,21 @@ internal static class TestDb
     public static bool SqlServerTemplateEnabled => UseSqlServer &&
         IsTrue(Environment.GetEnvironmentVariable("TENON_TEST_SQLSERVER_TEMPLATE"));
 
+    /// <summary>MySQL 是否启用模板库优化(默认关闭,避免改变普通本地测试行为)。</summary>
+    public static bool MySqlTemplateEnabled => UseMySql &&
+        IsTrue(Environment.GetEnvironmentVariable("TENON_TEST_MYSQL_TEMPLATE"));
+
+    /// <summary>当前数据库腿是否启用模板库优化。</summary>
+    public static bool SchemaTemplateEnabled => SqlServerTemplateEnabled || MySqlTemplateEnabled;
+
     /// <summary>当前是否正在由模板宿主初始化模板库。</summary>
-    public static bool IsSqlServerTemplateInitialization => sqlServerTemplateInitializing is not null;
+    public static bool IsSchemaTemplateInitialization =>
+        sqlServerTemplateInitializing is not null || mySqlTemplateInitializing is not null;
 
     /// <summary>判断当前工厂是否就是正在初始化的指定模板宿主,避免并行测试误接入模板库。</summary>
-    public static bool IsSqlServerTemplateInitializationFor(string templateKind, string databaseName) =>
-        string.Equals(sqlServerTemplateInitializing, templateKind, StringComparison.Ordinal) &&
+    public static bool IsSchemaTemplateInitializationFor(string templateKind, string databaseName) =>
+        (string.Equals(sqlServerTemplateInitializing, templateKind, StringComparison.Ordinal) ||
+         string.Equals(mySqlTemplateInitializing, templateKind, StringComparison.Ordinal)) &&
         string.Equals(databaseName, TemplateDbName(templateKind), StringComparison.Ordinal);
 
     /// <summary>隔离库名(由 identity 派生,合法标识符、稳定;MySQL 与 SqlServer 共用规则)。</summary>
@@ -96,13 +111,33 @@ internal static class TestDb
     }
 
     /// <summary>
-    /// SQL Server 模板模式的连接串。模板只由指定宿主 CodeFirst 一次,测试库从备份恢复;
+    /// 模板模式的连接串。模板只由指定宿主 CodeFirst 一次,测试库从模板复制;
     /// <paramref name="reset"/> 为 false 时保留同 identity 的已有库,兼容同库重启契约。
     /// </summary>
     public static string ConnectionString(string identity, string sqliteFile, string templateKind, bool reset = true)
     {
-        if (!SqlServerTemplateEnabled) return ConnectionString(identity, sqliteFile);
+        if (SqlServerTemplateEnabled) return SqlServerTemplateConnectionString(identity, templateKind, reset);
+        if (!MySqlTemplateEnabled) return ConnectionString(identity, sqliteFile);
 
+        lock (MySqlTemplateGate)
+        {
+            if (mySqlTemplateInitializing is not null)
+            {
+                if (!string.Equals(mySqlTemplateInitializing, templateKind, StringComparison.Ordinal))
+                    throw new InvalidOperationException("MySQL 模板初始化期间不能切换模板类型。");
+                return MySqlDatabaseConnection(TemplateDbName(templateKind));
+            }
+
+            EnsureMySqlTemplate(templateKind);
+            var db = DbName(identity);
+            if (reset || !MySqlDatabaseExists(db))
+                RestoreMySqlDatabase(db, templateKind, MySqlTemplateSchemas[templateKind]);
+            return MySqlDatabaseConnection(db);
+        }
+    }
+
+    private static string SqlServerTemplateConnectionString(string identity, string templateKind, bool reset)
+    {
         lock (SqlServerTemplateGate)
         {
             if (sqlServerTemplateInitializing is not null)
@@ -124,7 +159,13 @@ internal static class TestDb
     public static void Cleanup(string identity, string sqliteFile)
     {
         if (UseMySql)
-            try { ExecMySql($"DROP DATABASE IF EXISTS `{DbName(identity)}`;"); } catch { /* 尽力而为 */ }
+            try
+            {
+                var db = DbName(identity);
+                ClearMySqlPool(db);
+                ExecMySql($"DROP DATABASE IF EXISTS {MySqlIdentifier(db)};");
+            }
+            catch { /* 尽力而为 */ }
         else if (UseSqlServer)
             try
             {
@@ -168,6 +209,14 @@ internal static class TestDb
 
     private static string SqlServerConnection(string db) => $"{SqlServerBase.TrimEnd(';')};Database={db};";
 
+    private static string MySqlDatabaseConnection(string db) => $"{MySqlBase.TrimEnd(';')};Database={db};";
+
+    private static void ClearMySqlPool(string db)
+    {
+        using var conn = new MySqlConnection(MySqlDatabaseConnection(db));
+        MySqlConnection.ClearPool(conn);
+    }
+
     private static void EnsureSqlServerTemplate(string templateKind)
     {
         if (SqlServerTemplateBackups.ContainsKey(templateKind)) return;
@@ -197,6 +246,112 @@ internal static class TestDb
         {
             sqlServerTemplateInitializing = null;
         }
+    }
+
+    private static void EnsureMySqlTemplate(string templateKind)
+    {
+        if (MySqlTemplateSchemas.ContainsKey(templateKind)) return;
+
+        var templateDb = TemplateDbName(templateKind);
+        CreateMySqlDatabase(templateDb);
+        mySqlTemplateInitializing = templateKind;
+        try
+        {
+            if (string.Equals(templateKind, "workflow", StringComparison.Ordinal))
+            {
+                using var factory = new WorkflowAppFactory();
+                _ = factory.CreateClient();
+            }
+            else
+            {
+                using var factory = new AdminAppFactory { DbPath = templateDb, DeleteDbOnDispose = false };
+                _ = factory.CreateClient();
+            }
+
+            MySqlTemplateSchemas[templateKind] = ReadMySqlTemplateSchema(templateDb);
+            RegisterSqlServerTemplateCleanup();
+        }
+        finally
+        {
+            mySqlTemplateInitializing = null;
+        }
+    }
+
+    private static MySqlTemplateSchema ReadMySqlTemplateSchema(string templateDb)
+    {
+        using var conn = new MySqlConnection(MySqlDatabaseConnection(templateDb));
+        conn.Open();
+        using var tablesCommand = conn.CreateCommand();
+        tablesCommand.CommandText = "SELECT TABLE_NAME FROM information_schema.TABLES " +
+                                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' " +
+                                    "ORDER BY TABLE_NAME;";
+        var tableNames = new List<string>();
+        using (var tables = tablesCommand.ExecuteReader())
+        {
+            while (tables.Read()) tableNames.Add(tables.GetString(0));
+        }
+
+        var schemas = new List<(string, string)>(tableNames.Count);
+        foreach (var tableName in tableNames)
+        {
+            using var createCommand = conn.CreateCommand();
+            createCommand.CommandText = $"SHOW CREATE TABLE {MySqlIdentifier(templateDb)}.{MySqlIdentifier(tableName)};";
+            using var create = createCommand.ExecuteReader();
+            if (!create.Read()) throw new InvalidOperationException($"无法读取 MySQL 模板表结构:{tableName}");
+            schemas.Add((tableName, create.GetString(1)));
+        }
+
+        if (schemas.Count == 0) throw new InvalidOperationException("MySQL 模板库没有可复制的表。");
+        return new MySqlTemplateSchema(schemas);
+    }
+
+    private static void RestoreMySqlDatabase(string db, string templateKind, MySqlTemplateSchema schema)
+    {
+        DropMySqlDatabase(db);
+        CreateMySqlDatabase(db);
+
+        using var conn = new MySqlConnection(MySqlDatabaseConnection(db));
+        conn.Open();
+        using var command = conn.CreateCommand();
+        command.CommandTimeout = 300;
+        command.CommandText = "SET FOREIGN_KEY_CHECKS = 0;";
+        command.ExecuteNonQuery();
+
+        foreach (var (_, createSql) in schema.Tables)
+        {
+            command.CommandText = createSql;
+            command.ExecuteNonQuery();
+        }
+
+        foreach (var (tableName, _) in schema.Tables)
+        {
+            command.CommandText = $"INSERT INTO {MySqlIdentifier(tableName)} SELECT * FROM " +
+                                  $"{MySqlIdentifier(TemplateDbName(templateKind))}.{MySqlIdentifier(tableName)};";
+            command.ExecuteNonQuery();
+        }
+
+        command.CommandText = "SET FOREIGN_KEY_CHECKS = 1;";
+        command.ExecuteNonQuery();
+    }
+
+    private static void CreateMySqlDatabase(string db)
+    {
+        ExecMySql($"CREATE DATABASE IF NOT EXISTS {MySqlIdentifier(db)} CHARACTER SET utf8mb4;");
+    }
+
+    private static void DropMySqlDatabase(string db)
+    {
+        ExecMySql($"DROP DATABASE IF EXISTS {MySqlIdentifier(db)};");
+    }
+
+    private static bool MySqlDatabaseExists(string db)
+    {
+        using var conn = new MySqlConnection(MySqlBase);
+        conn.Open();
+        using var command = conn.CreateCommand();
+        command.CommandText = "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = @db LIMIT 1;";
+        command.Parameters.AddWithValue("@db", db);
+        return command.ExecuteScalar() is not null;
     }
 
     private static string TemplateDbName(string templateKind) =>
@@ -297,6 +452,8 @@ internal static class TestDb
 
     private static string SqlIdentifier(string value) => $"[{value.Replace("]", "]]", StringComparison.Ordinal)}]";
 
+    private static string MySqlIdentifier(string value) => $"`{value.Replace("`", "``", StringComparison.Ordinal)}`";
+
     private static string SqlLiteral(string value) => value.Replace("'", "''", StringComparison.Ordinal);
 
     private static bool IsTrue(string? value) => value is "1" or "true" or "True" or "TRUE";
@@ -327,6 +484,12 @@ internal static class TestDb
                     ExecSqlServer($"EXEC master.dbo.xp_delete_file 0, N'{SqlLiteral(backup)}', N'bak';");
                 }
                 catch { /* 部分 SQL Server 环境禁用扩展过程,容器销毁时一并清理 */ }
+            }
+
+            foreach (var templateKind in MySqlTemplateSchemas.Keys)
+            {
+                try { DropMySqlDatabase(TemplateDbName(templateKind)); }
+                catch { /* 进程退出时尽力清理 */ }
             }
         }
     }

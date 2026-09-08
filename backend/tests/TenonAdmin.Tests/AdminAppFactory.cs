@@ -32,15 +32,15 @@ public sealed class AdminAppFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment(EnvironmentName);
-        // SQL Server 可选模板库:普通开发测试从备份恢复,显式同库重启/生产闸门用例保留原始初始化路径。
+        // SQL Server/MySQL 可选模板库:普通开发测试从模板复制,显式同库重启/生产闸门用例保留原始初始化路径。
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
-        var useSqlServerTemplate = EnvironmentName == "Development" &&
-            (DeleteDbOnDispose || TestDb.IsSqlServerTemplateInitializationFor("admin", DbPath));
-        var connectionString = useSqlServerTemplate
+        var useSchemaTemplate = EnvironmentName == "Development" &&
+            (DeleteDbOnDispose || TestDb.IsSchemaTemplateInitializationFor("admin", DbPath));
+        var connectionString = useSchemaTemplate
             ? TestDb.ConnectionString(DbPath, DbPath, "admin")
             : TestDb.ConnectionString(DbPath, DbPath);
         builder.UseSetting("TenonAdmin:Database:ConnectionString", connectionString);
-        if (TestDb.SqlServerTemplateEnabled && !TestDb.IsSqlServerTemplateInitializationFor("admin", DbPath) &&
+        if (TestDb.SchemaTemplateEnabled && !TestDb.IsSchemaTemplateInitializationFor("admin", DbPath) &&
             EnvironmentName == "Development" && DeleteDbOnDispose)
         {
             builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");

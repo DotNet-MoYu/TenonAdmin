@@ -20,7 +20,7 @@ public sealed class WorkflowAppFactory : WebApplicationFactory<workflowhost::Wor
         builder.UseEnvironment("Development");
         builder.UseSetting("TenonAdmin:Database:DbType", TestDb.DbType);
         builder.UseSetting("TenonAdmin:Database:ConnectionString", TestDb.ConnectionString(DbPath, DbPath, "workflow"));
-        if (TestDb.SqlServerTemplateEnabled && !TestDb.IsSqlServerTemplateInitialization)
+        if (TestDb.SchemaTemplateEnabled && !TestDb.IsSchemaTemplateInitialization)
         {
             builder.UseSetting("TenonAdmin:Database:EnableCodeFirst", "false");
             builder.UseSetting("TenonAdmin:Database:EnableSeed", "false");
@@ -41,6 +41,6 @@ public sealed class WorkflowAppFactory : WebApplicationFactory<workflowhost::Wor
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing && !TestDb.IsSqlServerTemplateInitialization) TestDb.Cleanup(DbPath, DbPath);
+        if (disposing && !TestDb.IsSchemaTemplateInitialization) TestDb.Cleanup(DbPath, DbPath);
     }
 }
